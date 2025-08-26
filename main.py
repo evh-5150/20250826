@@ -132,19 +132,30 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
     for m in model.modules():
         if isinstance(m, nn.Dropout):
             m.train()
-    y_coords = range(0, h_sr, args.inf_patch_size - args.inf_overlap)
-    x_coords = range(0, w_sr, args.inf_patch_size - args.inf_overlap)
+    # パッチ座標の計算を改善
+    stride = args.inf_patch_size - args.inf_overlap
+    y_coords = list(range(0, h_sr - args.inf_patch_size + 1, stride))
+    x_coords = list(range(0, w_sr - args.inf_patch_size + 1, stride))
+    
+    # 最後のパッチが境界に到達するように調整
+    if y_coords and y_coords[-1] + args.inf_patch_size < h_sr:
+        y_coords.append(h_sr - args.inf_patch_size)
+    if x_coords and x_coords[-1] + args.inf_patch_size < w_sr:
+        x_coords.append(w_sr - args.inf_patch_size)
+    
     pbar_patch = tqdm(total=len(y_coords) * len(x_coords), desc="Processing Patches")
 
     for y in y_coords:
         for x in x_coords:
             y_start, x_start = y, x
-            y_end, x_end = min(y + args.inf_patch_size, h_sr), min(x + args.inf_patch_size, w_sr)
-            eff_h, eff_w = y_end - y_start, x_end - x_start
-            lr_y_start = y_start // args.upscale_factor
-            lr_x_start = x_start // args.upscale_factor
-            lr_y_end = (y_end + args.upscale_factor - 1) // args.upscale_factor
-            lr_x_end = (x_end + args.upscale_factor - 1) // args.upscale_factor
+            y_end, x_end = y_start + args.inf_patch_size, x_start + args.inf_patch_size
+            eff_h, eff_w = args.inf_patch_size, args.inf_patch_size
+            
+            # 条件画像の切り出しを改善（より大きな領域を確保）
+            lr_y_start = max(0, y_start // args.upscale_factor - 1)
+            lr_x_start = max(0, x_start // args.upscale_factor - 1)
+            lr_y_end = min(i_lr.shape[2], (y_end + args.upscale_factor - 1) // args.upscale_factor + 1)
+            lr_x_end = min(i_lr.shape[3], (x_end + args.upscale_factor - 1) // args.upscale_factor + 1)
             patch_cond = i_lr[:, :, lr_y_start:lr_y_end, lr_x_start:lr_x_end]
             
             patch_samples = []
@@ -153,10 +164,16 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
                 patch_t = torch.randn(patch_shape, device=device)
                 
                 with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=args.use_amp):
+                    # 条件画像のアップサンプリングを改善
                     interp_kwargs = {'mode': args.interpolation_mode}
                     if args.interpolation_mode == 'bilinear':
                         interp_kwargs['align_corners'] = False
-                    patch_cond_up = F.interpolate(patch_cond, size=patch_t.shape[2:], **interp_kwargs)
+                    
+                    # パッチサイズに合わせてアップサンプリング
+                    target_size = (eff_h, eff_w)
+                    patch_cond_up = F.interpolate(patch_cond, size=target_size, **interp_kwargs)
+                    
+                    # ノイズ除去プロセス
                     for t in reversed(range(args.timesteps)):
                         patch_t = p_sample(model, patch_t, t, patch_cond_up, device)
                 
@@ -166,14 +183,25 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
             
             samples_array = np.stack(patch_samples, axis=0)
             mean_patch, sq_mean_patch = samples_array.mean(axis=0), (samples_array**2).mean(axis=0)
-            current_window_np = window_np[:eff_h, :eff_w]
-            predictions_sum[y_start:y_end, x_start:x_end] += mean_patch * current_window_np
-            predictions_sq_sum[y_start:y_end, x_start:x_end] += sq_mean_patch * current_window_np
+            
+            # ウィンドウ関数を適用（固定サイズのパッチなので、ウィンドウサイズも固定）
+            current_window_np = window_np
+            mean_patch_windowed = mean_patch * current_window_np
+            sq_mean_patch_windowed = sq_mean_patch * current_window_np
+            
+            predictions_sum[y_start:y_end, x_start:x_end] += mean_patch_windowed
+            predictions_sq_sum[y_start:y_end, x_start:x_end] += sq_mean_patch_windowed
             weight_map_np[y_start:y_end, x_start:x_end] += current_window_np
             pbar_patch.update(1)
 
     pbar_patch.close()
     model.eval()
+    
+    # パッチ処理の統計情報を出力
+    print(f"Processed {len(y_coords) * len(x_coords)} patches")
+    print(f"Patch size: {args.inf_patch_size}, Overlap: {args.inf_overlap}")
+    print(f"Final image size: {h_sr}x{w_sr}")
+    print(f"Weight map range: {weight_map_np.min():.3f} - {weight_map_np.max():.3f}")
     
     weight_map_np[weight_map_np == 0] = 1.0
     mean_image_norm = predictions_sum / weight_map_np
