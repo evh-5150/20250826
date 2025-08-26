@@ -31,7 +31,7 @@ class Block(nn.Module):
         )
         
         if up:
-            self.conv1 = nn.Conv2d(2 * in_ch, out_ch, 3, padding=1)
+            self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
             self.transform = nn.ConvTranspose2d(out_ch, out_ch, 4, 2, 1)
         elif down:
             self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
@@ -56,6 +56,41 @@ class Block(nn.Module):
         h = self.bnorm2(self.relu(self.conv2(h)))
         # Down or up sample
         return self.transform(h)
+
+class UpBlock(nn.Module):
+    """Upsampling block that upsamples decoder features, concatenates with skip, and applies convs."""
+    
+    def __init__(self, in_main_ch: int, in_skip_ch: int, out_ch: int, time_emb_dim: int):
+        super().__init__()
+        self.time_mlp = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(time_emb_dim, out_ch)
+        )
+        # Upsample decoder path first to match skip spatial size and reduce channels
+        self.upsample = nn.ConvTranspose2d(in_main_ch, out_ch, kernel_size=4, stride=2, padding=1)
+        # Convolution after concatenation with skip (out_ch from upsample + in_skip_ch)
+        self.conv1 = nn.Conv2d(out_ch + in_skip_ch, out_ch, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1)
+        self.bnorm1 = nn.BatchNorm2d(out_ch)
+        self.bnorm2 = nn.BatchNorm2d(out_ch)
+        self.relu = nn.ReLU()
+    
+    def forward(self, x: torch.Tensor, skip: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        # Upsample decoder features
+        x = self.upsample(x)
+        # Ensure spatial sizes match exactly (guard against odd sizes)
+        if x.shape[-2:] != skip.shape[-2:]:
+            x = F.interpolate(x, size=skip.shape[-2:], mode='nearest')
+        # Concatenate with skip connection
+        x = torch.cat([x, skip], dim=1)
+        # First conv + time embedding
+        h = self.bnorm1(self.relu(self.conv1(x)))
+        time_emb = self.relu(self.time_mlp(t))
+        time_emb = time_emb[(..., ) + (None, ) * 2]
+        h = h + time_emb
+        # Second conv
+        h = self.bnorm2(self.relu(self.conv2(h)))
+        return h
 
 class SimpleUnet(nn.Module):
     """
@@ -98,8 +133,8 @@ class SimpleUnet(nn.Module):
         self.mid_block2 = Block(mid_channels, mid_channels, time_emb_dim)
         
         # Upsampling path
-        self.up1 = Block(mid_channels, model_channels * 2, time_emb_dim, up=True)
-        self.up2 = Block(model_channels * 2, model_channels, time_emb_dim, up=True)
+        self.up1 = UpBlock(in_main_ch=mid_channels, in_skip_ch=model_channels * 2, out_ch=model_channels * 2, time_emb_dim=time_emb_dim)
+        self.up2 = UpBlock(in_main_ch=model_channels * 2, in_skip_ch=model_channels, out_ch=model_channels, time_emb_dim=time_emb_dim)
         self.up3 = Block(model_channels, model_channels, time_emb_dim, up=True)
         
         # Final convolution
@@ -151,10 +186,10 @@ class SimpleUnet(nn.Module):
         x3 = self.dropout(x3)
         
         # Upsampling path with skip connections
-        x = self.up1(torch.cat([x3, x2], dim=1), t)
+        x = self.up1(x3, x2, t)
         x = self.dropout(x)
         
-        x = self.up2(torch.cat([x, x1], dim=1), t)
+        x = self.up2(x, x1, t)
         x = self.dropout(x)
         
         x = self.up3(x, t)
