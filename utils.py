@@ -134,6 +134,21 @@ def save_16bit_dicom_image(image_array: np.ndarray, original_dicom: pydicom.Data
     except Exception:
         series_base = 1
     new_dicom.SeriesNumber = series_base + 1000
+
+    # Set display window (VOI) based on robust percentiles for better default visualization
+    try:
+        arr = image_array.astype(np.uint16)
+        p1, p99 = np.percentile(arr, [1, 99]).astype(np.int64)
+        if p99 <= p1:
+            # Fallback to min/max if percentiles collapse
+            p1, p99 = int(arr.min()), int(arr.max())
+        window_center = int((p99 + p1) // 2)
+        window_width = int(max(1, p99 - p1))
+        new_dicom.WindowCenter = window_center
+        new_dicom.WindowWidth = window_width
+        new_dicom.VOILUTFunction = 'LINEAR'
+    except Exception:
+        pass
     
     # Save the new DICOM file
     new_dicom.save_as(output_path)
