@@ -46,40 +46,26 @@ def load_dicom_image(dicom_path: str, device: torch.device) -> Tuple[torch.Tenso
 
 def custom_downsample(image: torch.Tensor, scale_factor: int) -> torch.Tensor:
     """
-    Create a low-resolution version of the input image by downsampling.
-    
+    Create a low-resolution version of the input image by downsampling using
+    box-filter average pooling (additive average), which better mimics sampling
+    integration and avoids smoothing artifacts of bilinear interpolation.
+
     Args:
         image: Input image tensor of shape (1, 1, H, W)
         scale_factor: Downsampling factor
-    
+
     Returns:
         Low-resolution image tensor
     """
-    # Apply Gaussian blur before downsampling to prevent aliasing
-    kernel_size = scale_factor * 2 + 1
-    sigma = scale_factor / 3.0
-    
-    # Create Gaussian kernel
-    coords = torch.arange(kernel_size, dtype=torch.float32, device=image.device) - kernel_size // 2
-    kernel = torch.exp(-0.5 * (coords / sigma) ** 2)
-    kernel = kernel / kernel.sum()
-    
-    # Apply 2D Gaussian blur
-    kernel_2d = kernel.unsqueeze(0) * kernel.unsqueeze(1)
-    kernel_2d = kernel_2d.unsqueeze(0).unsqueeze(0)
-    
-    # Pad the image
-    pad_size = kernel_size // 2
-    padded_image = F.pad(image, (pad_size, pad_size, pad_size, pad_size), mode='reflect')
-    
-    # Apply convolution
-    blurred_image = F.conv2d(padded_image, kernel_2d, padding=0)
-    
-    # Downsample
-    _, _, h, w = blurred_image.shape
-    new_h, new_w = h // scale_factor, w // scale_factor
-    downsampled = F.interpolate(blurred_image, size=(new_h, new_w), mode='bilinear', align_corners=False)
-    
+    # Ensure spatial dimensions are multiples of scale_factor to avoid edge bias
+    _, _, h, w = image.shape
+    s = scale_factor
+    h_cropped = (h // s) * s
+    w_cropped = (w // s) * s
+    if h_cropped != h or w_cropped != w:
+        image = image[:, :, :h_cropped, :w_cropped]
+    # Box average pooling (sum over s x s then divide by area)
+    downsampled = F.avg_pool2d(image, kernel_size=s, stride=s, ceil_mode=False, count_include_pad=False)
     return downsampled
 
 def get_image_patches(image: torch.Tensor, patch_size: int, batch_size: int) -> torch.Tensor:
