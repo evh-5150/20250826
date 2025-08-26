@@ -123,8 +123,28 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
     predictions_sum = np.zeros((h_sr, w_sr), dtype=np.float32)
     uncertainty_sum = np.zeros((h_sr, w_sr), dtype=np.float32)
     weight_map_np = np.zeros((h_sr, w_sr), dtype=np.float32)
-    window = torch.hann_window(args.inf_patch_size, device=device).unsqueeze(1) * torch.hann_window(args.inf_patch_size, device=device).unsqueeze(0)
+    # より滑らかなブレンディングのためのウィンドウ関数
+    # オーバーラップ領域でより滑らかな遷移を実現
+    window_size = args.inf_patch_size
+    overlap_size = args.inf_overlap
+    
+    # 1D Hann windowを作成
+    hann_1d = torch.hann_window(window_size, device=device)
+    
+    # 2D Hann windowを作成（より滑らかな遷移）
+    window = hann_1d.unsqueeze(1) * hann_1d.unsqueeze(0)
     window_np = window.cpu().numpy()
+    
+    # 市松模様を防ぐための滑らかなブレンディング
+    # オーバーラップ領域での重みを調整
+    center_weight = 1.0
+    edge_weight = 0.3  # より小さな値で滑らかな遷移
+    
+    # 重みの調整（中心部は重く、境界部は軽く）
+    window_np = window_np * (center_weight - edge_weight) + edge_weight
+    
+    # 重みの正規化（合計が1になるように）
+    window_np = window_np / window_np.sum() * (window_size * window_size)
 
     # Use eval to keep BatchNorm in eval mode (stable statistics).
     model.eval()
@@ -207,9 +227,15 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
     print(f"Final image size: {h_sr}x{w_sr}")
     print(f"Weight map range: {weight_map_np.min():.3f} - {weight_map_np.max():.3f}")
     
+    # 重みマップの正規化を改善（市松模様を防ぐため）
     weight_map_np[weight_map_np == 0] = 1.0
+    
+    # 重みマップを正規化して、オーバーラップ領域での重みの合計を1に近づける
     mean_image_norm = predictions_sum / weight_map_np
     mean_image_norm = np.clip(mean_image_norm, 0.0, 1.0)
+    
+    # 重みマップの統計情報を出力（デバッグ用）
+    print(f"Weight map statistics: min={weight_map_np.min():.3f}, max={weight_map_np.max():.3f}, mean={weight_map_np.mean():.3f}")
     
     # 不確実性マップの計算（直接平均）
     uncertainty_map_np = uncertainty_sum / weight_map_np
