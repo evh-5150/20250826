@@ -103,6 +103,39 @@ python main.py --mode zs \
   --prior_path prior.pth
 ```
 
+## Download public datasets
+
+You can fetch datasets via HTTP or Kaggle using:
+
+```bash
+python download_data.py \
+  --dest /data/med \
+  --kaggle_competition rsna-pneumonia-detection-challenge \
+  --extract
+```
+
+Or specify URLs (and auto-extract):
+```bash
+python download_data.py \
+  --dest /data/med \
+  --url https://example.org/dataset.zip \
+  --extract
+```
+
+Then pretrain the prior with the downloaded folder:
+```bash
+python pretrain_prior.py \
+  --data_dir /data/med \
+  --output prior.pth \
+  --patch_size 128 \
+  --batch_size 16 \
+  --epochs 10 \
+  --timesteps 200 \
+  --use_amp
+```
+
+Note: Kaggle downloads require `pip install kaggle` and API credentials in `~/.kaggle/kaggle.json`.
+
 ## Parameters
 
 ### Training Parameters
