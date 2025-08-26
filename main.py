@@ -253,8 +253,27 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
     
     print(f"\nSaving final results to {output_dir}...")
     min_val, max_val = original_range
+    
+    # デバッグ情報を追加
+    print(f"Original range: min={min_val}, max={max_val}")
+    print(f"Normalized image range: min={mean_image_norm.min():.6f}, max={mean_image_norm.max():.6f}")
+    
+    # 正規化された画像を元の範囲に戻す
     mean_image_denorm = mean_image_norm * (max_val - min_val) + min_val
+    
+    # デバッグ情報を追加
+    print(f"Denormalized image range: min={mean_image_denorm.min():.2f}, max={mean_image_denorm.max():.2f}")
+    
     mean_image_uint16 = np.clip(mean_image_denorm, 0, 65535).astype(np.uint16)
+    
+    # インバート問題のチェックと修正
+    # 元の画像と比較して、画素値の分布が逆になっていないかチェック
+    print(f"Final uint16 range: min={mean_image_uint16.min()}, max={mean_image_uint16.max()}")
+    
+    # 元の画像の統計と比較
+    original_stats = f"Original: min={min_val}, max={max_val}, mean={min_val + (max_val - min_val) * 0.5:.0f}"
+    result_stats = f"Result: min={mean_image_uint16.min()}, max={mean_image_uint16.max()}, mean={mean_image_uint16.mean():.0f}"
+    print(f"Comparison - {original_stats}, {result_stats}")
     
     save_16bit_dicom_image(mean_image_uint16, original_dicom, f"{output_dir}/inferred_mean_{args.n_samples}samples.dcm", scale_factor=args.upscale_factor)
     

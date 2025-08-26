@@ -36,8 +36,14 @@ def load_dicom_image(dicom_path: str, device: torch.device) -> Tuple[torch.Tenso
     # Get original range
     min_val, max_val = float(pixel_array.min()), float(pixel_array.max())
     
+    # デバッグ情報を追加
+    print(f"Original DICOM range: min={min_val}, max={max_val}")
+    
     # Normalize to [-1, 1] range
     normalized_array = 2.0 * (pixel_array - min_val) / (max_val - min_val) - 1.0
+    
+    # デバッグ情報を追加
+    print(f"Normalized range: min={normalized_array.min():.6f}, max={normalized_array.max():.6f}")
     
     # Convert to tensor and add batch and channel dimensions
     image_tensor = torch.from_numpy(normalized_array).float().unsqueeze(0).unsqueeze(0)
