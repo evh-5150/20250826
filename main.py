@@ -126,7 +126,12 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
     window = torch.hann_window(args.inf_patch_size, device=device).unsqueeze(1) * torch.hann_window(args.inf_patch_size, device=device).unsqueeze(0)
     window_np = window.cpu().numpy()
 
-    model.train()
+    # Use eval to keep BatchNorm in eval mode (stable statistics).
+    model.eval()
+    # Keep dropout active for MC sampling by setting only Dropout layers to train mode.
+    for m in model.modules():
+        if isinstance(m, nn.Dropout):
+            m.train()
     y_coords = range(0, h_sr, args.inf_patch_size - args.inf_overlap)
     x_coords = range(0, w_sr, args.inf_patch_size - args.inf_overlap)
     pbar_patch = tqdm(total=len(y_coords) * len(x_coords), desc="Processing Patches")
@@ -148,7 +153,10 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
                 patch_t = torch.randn(patch_shape, device=device)
                 
                 with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=args.use_amp):
-                    patch_cond_up = F.interpolate(patch_cond, size=patch_t.shape[2:], mode='bilinear', align_corners=False)
+                    interp_kwargs = {'mode': args.interpolation_mode}
+                    if args.interpolation_mode == 'bilinear':
+                        interp_kwargs['align_corners'] = False
+                    patch_cond_up = F.interpolate(patch_cond, size=patch_t.shape[2:], **interp_kwargs)
                     for t in reversed(range(args.timesteps)):
                         patch_t = p_sample(model, patch_t, t, patch_cond_up, device)
                 
