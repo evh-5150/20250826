@@ -121,7 +121,7 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
     
     h_sr, w_sr = target_shape[2], target_shape[3]
     predictions_sum = np.zeros((h_sr, w_sr), dtype=np.float32)
-    predictions_sq_sum = np.zeros((h_sr, w_sr), dtype=np.float32)
+    uncertainty_sum = np.zeros((h_sr, w_sr), dtype=np.float32)
     weight_map_np = np.zeros((h_sr, w_sr), dtype=np.float32)
     window = torch.hann_window(args.inf_patch_size, device=device).unsqueeze(1) * torch.hann_window(args.inf_patch_size, device=device).unsqueeze(0)
     window_np = window.cpu().numpy()
@@ -184,13 +184,17 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
             samples_array = np.stack(patch_samples, axis=0)
             mean_patch, sq_mean_patch = samples_array.mean(axis=0), (samples_array**2).mean(axis=0)
             
-            # ウィンドウ関数を適用（固定サイズのパッチなので、ウィンドウサイズも固定）
+            # 不確実性を計算（ウィンドウ関数適用前）
+            variance_patch = np.maximum(sq_mean_patch - mean_patch**2, 0)
+            uncertainty_patch = np.sqrt(variance_patch)
+            
+            # ウィンドウ関数を適用
             current_window_np = window_np
             mean_patch_windowed = mean_patch * current_window_np
-            sq_mean_patch_windowed = sq_mean_patch * current_window_np
+            uncertainty_patch_windowed = uncertainty_patch * current_window_np
             
             predictions_sum[y_start:y_end, x_start:x_end] += mean_patch_windowed
-            predictions_sq_sum[y_start:y_end, x_start:x_end] += sq_mean_patch_windowed
+            uncertainty_sum[y_start:y_end, x_start:x_end] += uncertainty_patch_windowed
             weight_map_np[y_start:y_end, x_start:x_end] += current_window_np
             pbar_patch.update(1)
 
@@ -206,14 +210,11 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
     weight_map_np[weight_map_np == 0] = 1.0
     mean_image_norm = predictions_sum / weight_map_np
     mean_image_norm = np.clip(mean_image_norm, 0.0, 1.0)
-    mean_sq_image = predictions_sq_sum / weight_map_np
     
-    # 不確実性マップの計算を改善
-    variance_map = np.maximum(mean_sq_image - mean_image_norm**2, 0)
-    uncertainty_map_np = np.sqrt(variance_map)
+    # 不確実性マップの計算（直接平均）
+    uncertainty_map_np = uncertainty_sum / weight_map_np
     
     # 不確実性の統計情報を出力
-    print(f"Uncertainty calculation: variance_min={variance_map.min():.8f}, variance_max={variance_map.max():.8f}")
     print(f"Uncertainty calculation: uncertainty_min={uncertainty_map_np.min():.8f}, uncertainty_max={uncertainty_map_np.max():.8f}")
     
     # 不確実性推定の改善提案
