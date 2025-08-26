@@ -181,9 +181,92 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
     plt.imsave(f"{output_dir}/inferred_uncertainty_{args.n_samples}samples.png", uncertainty_map_normalized, cmap='inferno')
     print("Inference finished.")
 
+def A_box_average(hr_image: torch.Tensor, scale: int) -> torch.Tensor:
+    """Forward operator A: box-average downsampling by integer factor (uses utils.custom_downsample semantics)."""
+    return F.avg_pool2d(hr_image, kernel_size=scale, stride=scale, ceil_mode=False, count_include_pad=False)
+
+
+def AT_box_average(lr_residual: torch.Tensor, scale: int, target_size: torch.Size) -> torch.Tensor:
+    """Adjoint A^T of box-average downsampling: repeat residual to HR grid and normalize.
+    target_size: (B, C, H, W) of HR image
+    """
+    up = lr_residual.repeat_interleave(scale, dim=-1).repeat_interleave(scale, dim=-2)
+    # Crop or pad to match target size
+    _, _, H, W = target_size
+    up = up[:, :, :H, :W]
+    return up / (scale * scale)
+
+
+@torch.no_grad()
+def run_zero_shot(args, device):
+    """Zero-shot SR with diffusion prior via simple data-consistency projection (DPS-like)."""
+    if not args.prior_path:
+        raise SystemExit("--prior_path is required for --mode zs (pretrained diffusion prior weights)")
+
+    # Load LR image
+    i_lr, original_range, original_dicom = load_dicom_image(args.input_image_path, device)
+    upscale = args.upscale_factor
+
+    # Prepare HR target shape
+    H_hr, W_hr = i_lr.shape[2] * upscale, i_lr.shape[3] * upscale
+    x = torch.randn(1, 1, H_hr, W_hr, device=device)
+
+    # Condition: nearest-exact upsample of LR (no smoothing)
+    cond = F.interpolate(i_lr, size=(H_hr, W_hr), mode='nearest-exact')
+
+    # Model
+    model = SimpleUnet(dropout_rate=args.dropout_rate).to(device)
+    state = torch.load(args.prior_path, map_location=device)
+    model.load_state_dict(state)
+    model.eval()
+
+    # Schedules (use global schedule already set)
+    timesteps = args.timesteps
+
+    for t in reversed(range(timesteps)):
+        t_tensor = torch.full((1,), t, device=device, dtype=torch.long)
+        betas_t = schedule.betas.to(device)[t].reshape(-1, 1, 1, 1)
+        sqrt_one_minus_alphas_cumprod_t = schedule.sqrt_one_minus_alphas_cumprod.to(device)[t].reshape(-1, 1, 1, 1)
+        sqrt_recip_alphas_t = schedule.sqrt_recip_alphas.to(device)[t].reshape(-1, 1, 1, 1)
+
+        # Predict noise and DDPM mean
+        pred_noise = model(x, t_tensor, cond)
+        model_mean = sqrt_recip_alphas_t * (x - betas_t * pred_noise / sqrt_one_minus_alphas_cumprod_t)
+
+        # Data-consistency in x0-space: enforce A(x0) ≈ y
+        # Estimate x0 from current step
+        # x0 ≈ (x - sqrt(1-ᾱ_t) * ε)/sqrt(ᾱ_t)
+        sqrt_alphas_cumprod_t = schedule.sqrt_alphas_cumprod.to(device)[t].reshape(-1, 1, 1, 1)
+        x0_est = (x - sqrt_one_minus_alphas_cumprod_t * pred_noise) / (sqrt_alphas_cumprod_t + 1e-8)
+        # Residual in LR space
+        y_obs = i_lr
+        y_hat = A_box_average(x0_est, upscale)
+        r = y_hat - y_obs
+        # Backproject
+        grad = AT_box_average(r, upscale, x0_est.shape)
+        x0_corrected = x0_est - args.zs_lambda * grad
+        # Map corrected x0 back to x_t domain by re-noising with expected noise
+        x = sqrt_alphas_cumprod_t * x0_corrected + sqrt_one_minus_alphas_cumprod_t * pred_noise
+
+        # Add stochasticity except at t==0
+        if t > 0:
+            posterior_variance_t = schedule.posterior_variance.to(device)[t].reshape(-1, 1, 1, 1)
+            noise = torch.randn_like(x)
+            x = model_mean + torch.sqrt(posterior_variance_t) * noise
+        else:
+            x = model_mean
+
+    # Save outputs
+    output_dir = args.output_dir_base
+    os.makedirs(output_dir, exist_ok=True)
+    min_val, max_val = original_range
+    x_denorm = ((x.clamp(-1, 1) + 1.0) / 2.0) * (max_val - min_val) + min_val
+    x_uint16 = torch.clamp(x_denorm, 0, 65535).squeeze().short().cpu().numpy().astype('uint16')
+    save_16bit_dicom_image(x_uint16, original_dicom, os.path.join(output_dir, f"zs_inferred_x{upscale}.dcm"), scale_factor=upscale)
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Unified script for ZSSD-SR with advanced losses.")
-    parser.add_argument("--mode", type=str, default="full", choices=['train', 'inference', 'full'])
+    parser.add_argument("--mode", type=str, default="full", choices=['train', 'inference', 'full', 'zs'])
     parser.add_argument("--input_image_path", type=str, default="Input/Images/MMG.dcm")
     parser.add_argument("--upscale_factor", type=int, default=2)
     parser.add_argument("--dropout_rate", type=float, default=0.1)
@@ -201,6 +284,8 @@ if __name__ == '__main__':
     parser.add_argument("--inf_overlap", type=int, default=128)
     parser.add_argument("--n_samples", type=int, default=3)
     parser.add_argument("--use_amp", action='store_true', help="Use Automatic Mixed Precision for faster training and inference.")
+    parser.add_argument("--prior_path", type=str, help="Path to the pretrained diffusion model weights for zero-shot mode.")
+    parser.add_argument("--zs_lambda", type=float, default=0.1, help="Lambda for data-consistency projection in zero-shot mode.")
     
     args = parser.parse_args()
 
@@ -226,3 +311,5 @@ if __name__ == '__main__':
         args.model_path = os.path.join(output_dir, "model.pth")
         run_inference(args, device, model=model, output_dir=output_dir, i_lr=i_lr,
                       original_range=original_range, original_dicom=original_dicom)
+    elif args.mode == 'zs':
+        run_zero_shot(args, device)
