@@ -179,7 +179,18 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
     mean_image_norm = predictions_sum / weight_map_np
     mean_image_norm = np.clip(mean_image_norm, 0.0, 1.0)
     mean_sq_image = predictions_sq_sum / weight_map_np
-    uncertainty_map_np = np.sqrt(np.maximum(mean_sq_image - mean_image_norm**2, 0))
+    
+    # 不確実性マップの計算を改善
+    variance_map = np.maximum(mean_sq_image - mean_image_norm**2, 0)
+    uncertainty_map_np = np.sqrt(variance_map)
+    
+    # 不確実性の統計情報を出力
+    print(f"Uncertainty calculation: variance_min={variance_map.min():.8f}, variance_max={variance_map.max():.8f}")
+    print(f"Uncertainty calculation: uncertainty_min={uncertainty_map_np.min():.8f}, uncertainty_max={uncertainty_map_np.max():.8f}")
+    
+    # 不確実性推定の改善提案
+    if args.n_samples < 5:
+        print(f"Note: For better uncertainty estimation, consider using --n_samples 5 or higher (current: {args.n_samples})")
     
     print(f"\nSaving final results to {output_dir}...")
     min_val, max_val = original_range
@@ -188,8 +199,29 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
     
     save_16bit_dicom_image(mean_image_uint16, original_dicom, f"{output_dir}/inferred_mean_{args.n_samples}samples.dcm", scale_factor=args.upscale_factor)
     
-    uncertainty_map_normalized = (uncertainty_map_np - uncertainty_map_np.min()) / (uncertainty_map_np.max() + 1e-9)
-    plt.imsave(f"{output_dir}/inferred_uncertainty_{args.n_samples}samples.png", uncertainty_map_normalized, cmap='inferno')
+    # 不確実性マップの可視化を改善
+    uncertainty_min = uncertainty_map_np.min()
+    uncertainty_max = uncertainty_map_np.max()
+    uncertainty_p99 = np.percentile(uncertainty_map_np, 99)
+    
+    print(f"Uncertainty stats: min={uncertainty_min:.6f}, max={uncertainty_max:.6f}, p99={uncertainty_p99:.6f}")
+    
+    # 99パーセンタイルで正規化して、外れ値の影響を減らす
+    if uncertainty_p99 > 0:
+        uncertainty_normalized = np.clip(uncertainty_map_np / uncertainty_p99, 0, 1)
+    else:
+        uncertainty_normalized = uncertainty_map_np
+    
+    # 対数スケールでも可視化
+    uncertainty_log = np.log1p(uncertainty_map_np * 1000)  # log1p(x) = log(1+x)
+    uncertainty_log_normalized = (uncertainty_log - uncertainty_log.min()) / (uncertainty_log.max() - uncertainty_log.min() + 1e-9)
+    
+    plt.imsave(f"{output_dir}/inferred_uncertainty_{args.n_samples}samples.png", uncertainty_normalized, cmap='inferno')
+    plt.imsave(f"{output_dir}/inferred_uncertainty_{args.n_samples}samples_log.png", uncertainty_log_normalized, cmap='inferno')
+    
+    # 不確実性マップをDICOM形式でも保存（スケール調整済み）
+    uncertainty_scaled = (uncertainty_map_np * 1000).astype(np.uint16)  # スケールアップしてuint16に変換
+    save_16bit_dicom_image(uncertainty_scaled, original_dicom, f"{output_dir}/inferred_uncertainty_{args.n_samples}samples.dcm", scale_factor=args.upscale_factor)
     print("Inference finished.")
 
 def A_box_average(hr_image: torch.Tensor, scale: int) -> torch.Tensor:
