@@ -96,6 +96,10 @@ def run_training(args, device):
         scaler.update()
         
         pbar.set_postfix(loss=total_loss.item(), l1=loss_l1.item(), perc=loss_perceptual.item())
+        
+        # 学習の進捗を定期的に表示
+        if step % 100 == 0:
+            print(f"\nStep {step}: Loss={total_loss.item():.4f}, L1={loss_l1.item():.4f}, Perceptual={loss_perceptual.item():.4f}")
 
     print("\nTraining finished.")
     model_save_path = f"{output_dir}/model.pth"
@@ -171,12 +175,12 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
             y_end, x_end = y_start + args.inf_patch_size, x_start + args.inf_patch_size
             eff_h, eff_w = args.inf_patch_size, args.inf_patch_size
             
-            # 条件画像の切り出しを改善（より大きな領域を確保）
-            lr_y_start = max(0, y_start // args.upscale_factor - 1)
-            lr_x_start = max(0, x_start // args.upscale_factor - 1)
-            lr_y_end = min(i_lr.shape[2], (y_end + args.upscale_factor - 1) // args.upscale_factor + 1)
-            lr_x_end = min(i_lr.shape[3], (x_end + args.upscale_factor - 1) // args.upscale_factor + 1)
-            patch_cond = i_lr[:, :, lr_y_start:lr_y_end, lr_x_start:lr_x_end]
+                # 条件画像の切り出しを改善（より大きな領域を確保）
+    lr_y_start = max(0, y_start // args.upscale_factor - 2)
+    lr_x_start = max(0, x_start // args.upscale_factor - 2)
+    lr_y_end = min(i_lr.shape[2], (y_end + args.upscale_factor - 1) // args.upscale_factor + 2)
+    lr_x_end = min(i_lr.shape[3], (x_end + args.upscale_factor - 1) // args.upscale_factor + 2)
+    patch_cond = i_lr[:, :, lr_y_start:lr_y_end, lr_x_start:lr_x_end]
             
             patch_samples = []
             for _ in range(args.n_samples):
@@ -370,15 +374,15 @@ if __name__ == '__main__':
     parser.add_argument("--dropout_rate", type=float, default=0.1)
     parser.add_argument("--timesteps", type=int, default=200)
     parser.add_argument("--output_dir_base", type=str, default="Results")
-    parser.add_argument("--training_steps", type=int, default=20000)
+    parser.add_argument("--training_steps", type=int, default=3000)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--patch_size", type=int, default=96, help="Patch size for TRAINING.")
+    parser.add_argument("--patch_size", type=int, default=128, help="Patch size for TRAINING.")
     parser.add_argument("--interpolation_mode", type=str, default='bilinear', choices=['bilinear', 'nearest-exact'])
     parser.add_argument("--lambda_l1", type=float, default=1.0)
     parser.add_argument("--lambda_perceptual", type=float, default=0.1)
     parser.add_argument("--model_path", type=str, help="Path to the trained model for inference mode.")
-    parser.add_argument("--inf_patch_size", type=int, default=256)
+    parser.add_argument("--inf_patch_size", type=int, default=384)
     parser.add_argument("--inf_overlap", type=int, default=128)
     parser.add_argument("--n_samples", type=int, default=3)
     parser.add_argument("--use_amp", action='store_true', help="Use Automatic Mixed Precision for faster training and inference.")
