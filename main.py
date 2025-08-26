@@ -152,7 +152,9 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
                     for t in reversed(range(args.timesteps)):
                         patch_t = p_sample(model, patch_t, t, patch_cond_up, device)
                 
-                patch_samples.append((patch_t.float().cpu().squeeze().numpy() + 1.0) / 2.0)
+                patch_np = (patch_t.float().cpu().squeeze().numpy() + 1.0) / 2.0
+                patch_np = np.clip(patch_np, 0.0, 1.0)
+                patch_samples.append(patch_np)
             
             samples_array = np.stack(patch_samples, axis=0)
             mean_patch, sq_mean_patch = samples_array.mean(axis=0), (samples_array**2).mean(axis=0)
@@ -167,6 +169,7 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
     
     weight_map_np[weight_map_np == 0] = 1.0
     mean_image_norm = predictions_sum / weight_map_np
+    mean_image_norm = np.clip(mean_image_norm, 0.0, 1.0)
     mean_sq_image = predictions_sq_sum / weight_map_np
     uncertainty_map_np = np.sqrt(np.maximum(mean_sq_image - mean_image_norm**2, 0))
     
