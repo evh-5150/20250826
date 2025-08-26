@@ -77,6 +77,32 @@ python main.py \
     --use_amp
 ```
 
+## Pretraining an Unconditional Diffusion Prior (Zero-Shot Support)
+
+If you want to run zero-shot SR (`--mode zs`), prepare a pretrained prior first.
+You can pretrain on open medical images (DICOM/PNG/JPG) using:
+
+```bash
+python pretrain_prior.py \
+  --data_dir /path/to/open_medical_images \
+  --output prior.pth \
+  --patch_size 128 \
+  --batch_size 16 \
+  --epochs 10 \
+  --timesteps 200 \
+  --use_amp
+```
+
+Then run zero-shot inference with data consistency:
+
+```bash
+python main.py --mode zs \
+  --input_image_path /path/MMG.dcm \
+  --upscale_factor 2 \
+  --timesteps 100 \
+  --prior_path prior.pth
+```
+
 ## Parameters
 
 ### Training Parameters
