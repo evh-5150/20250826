@@ -128,7 +128,12 @@ def save_16bit_dicom_image(image_array: np.ndarray, original_dicom: pydicom.Data
     
     # Update metadata
     new_dicom.SeriesDescription = f"Super-resolved (x{scale_factor})"
-    new_dicom.SeriesNumber = getattr(new_dicom, 'SeriesNumber', 1) + 1000
+    series_number = getattr(new_dicom, 'SeriesNumber', None)
+    try:
+        series_base = int(series_number) if series_number is not None else 1
+    except Exception:
+        series_base = 1
+    new_dicom.SeriesNumber = series_base + 1000
     
     # Save the new DICOM file
     new_dicom.save_as(output_path)
