@@ -127,46 +127,45 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
     predictions_sum = np.zeros((h_sr, w_sr), dtype=np.float32)
     uncertainty_sum = np.zeros((h_sr, w_sr), dtype=np.float32)
     weight_map_np = np.zeros((h_sr, w_sr), dtype=np.float32)
-    # より滑らかなブレンディングのためのウィンドウ関数
-    # オーバーラップ領域でより滑らかな遷移を実現
     window_size = args.inf_patch_size
     overlap_size = args.inf_overlap
     
-    # 1D Hann windowを作成
     hann_1d = torch.hann_window(window_size, device=device)
     
-    # 2D Hann windowを作成（より滑らかな遷移）
     window = hann_1d.unsqueeze(1) * hann_1d.unsqueeze(0)
     window_np = window.cpu().numpy()
     
-    # 市松模様を防ぐための滑らかなブレンディング
-    # オーバーラップ領域での重みを調整
     center_weight = 1.0
-    edge_weight = 0.3  # より小さな値で滑らかな遷移
+    edge_weight = 0.1
     
-    # 重みの調整（中心部は重く、境界部は軽く）
     window_np = window_np * (center_weight - edge_weight) + edge_weight
     
-    # 重みの正規化（合計が1になるように）
     window_np = window_np / window_np.sum() * (window_size * window_size)
 
-    # Use eval to keep BatchNorm in eval mode (stable statistics).
     model.eval()
-    # Keep dropout active for MC sampling by setting only Dropout layers to train mode.
     for m in model.modules():
         if isinstance(m, nn.Dropout):
             m.train()
-    # パッチ座標の計算を改善
     stride = args.inf_patch_size - args.inf_overlap
     y_coords = list(range(0, h_sr - args.inf_patch_size + 1, stride))
     x_coords = list(range(0, w_sr - args.inf_patch_size + 1, stride))
     
+    # 市松模様を防ぐために、より小さなストライドを使用
+    if len(y_coords) > 1 and len(x_coords) > 1:
+    # オーバーラップを50%以上に増やす
+    min_overlap = args.inf_patch_size // 2
+    if args.inf_overlap < min_overlap:
+    print(f"Warning: Increasing overlap from {args.inf_overlap} to {min_overlap} to prevent checkerboard pattern")
+    stride = args.inf_patch_size - min_overlap
+    y_coords = list(range(0, h_sr - args.inf_patch_size + 1, stride))
+    x_coords = list(range(0, w_sr - args.inf_patch_size + 1, stride))
+        
     # 最後のパッチが境界に到達するように調整
     if y_coords and y_coords[-1] + args.inf_patch_size < h_sr:
         y_coords.append(h_sr - args.inf_patch_size)
     if x_coords and x_coords[-1] + args.inf_patch_size < w_sr:
         x_coords.append(w_sr - args.inf_patch_size)
-    
+        
     pbar_patch = tqdm(total=len(y_coords) * len(x_coords), desc="Processing Patches")
 
     for y in y_coords:
@@ -175,12 +174,11 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
             y_end, x_end = y_start + args.inf_patch_size, x_start + args.inf_patch_size
             eff_h, eff_w = args.inf_patch_size, args.inf_patch_size
             
-                # 条件画像の切り出しを改善（より大きな領域を確保）
-    lr_y_start = max(0, y_start // args.upscale_factor - 2)
-    lr_x_start = max(0, x_start // args.upscale_factor - 2)
-    lr_y_end = min(i_lr.shape[2], (y_end + args.upscale_factor - 1) // args.upscale_factor + 2)
-    lr_x_end = min(i_lr.shape[3], (x_end + args.upscale_factor - 1) // args.upscale_factor + 2)
-    patch_cond = i_lr[:, :, lr_y_start:lr_y_end, lr_x_start:lr_x_end]
+            lr_y_start = max(0, y_start // args.upscale_factor - 2)
+            lr_x_start = max(0, x_start // args.upscale_factor - 2)
+            lr_y_end = min(i_lr.shape[2], (y_end + args.upscale_factor - 1) // args.upscale_factor + 2)
+            lr_x_end = min(i_lr.shape[3], (x_end + args.upscale_factor - 1) // args.upscale_factor + 2)
+            patch_cond = i_lr[:, :, lr_y_start:lr_y_end, lr_x_start:lr_x_end]
             
             patch_samples = []
             for _ in range(args.n_samples):
@@ -188,16 +186,13 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
                 patch_t = torch.randn(patch_shape, device=device)
                 
                 with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=args.use_amp):
-                    # 条件画像のアップサンプリングを改善
                     interp_kwargs = {'mode': args.interpolation_mode}
                     if args.interpolation_mode == 'bilinear':
                         interp_kwargs['align_corners'] = False
                     
-                    # パッチサイズに合わせてアップサンプリング
                     target_size = (eff_h, eff_w)
                     patch_cond_up = F.interpolate(patch_cond, size=target_size, **interp_kwargs)
                     
-                    # ノイズ除去プロセス
                     for t in reversed(range(args.timesteps)):
                         patch_t = p_sample(model, patch_t, t, patch_cond_up, device)
                 
@@ -206,13 +201,11 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
                 patch_samples.append(patch_np)
             
             samples_array = np.stack(patch_samples, axis=0)
-            mean_patch, sq_mean_patch = samples_array.mean(axis=0), (samples_array**2).mean(axis=0)
+            mean_patch = samples_array.mean(axis=0)
             
-            # 不確実性を計算（ウィンドウ関数適用前）
-            variance_patch = np.maximum(sq_mean_patch - mean_patch**2, 0)
+            variance_patch = np.mean((samples_array - mean_patch)**2, axis=0)
             uncertainty_patch = np.sqrt(variance_patch)
             
-            # ウィンドウ関数を適用
             current_window_np = window_np
             mean_patch_windowed = mean_patch * current_window_np
             uncertainty_patch_windowed = uncertainty_patch * current_window_np
@@ -225,80 +218,66 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
     pbar_patch.close()
     model.eval()
     
-    # パッチ処理の統計情報を出力
     print(f"Processed {len(y_coords) * len(x_coords)} patches")
     print(f"Patch size: {args.inf_patch_size}, Overlap: {args.inf_overlap}")
     print(f"Final image size: {h_sr}x{w_sr}")
     print(f"Weight map range: {weight_map_np.min():.3f} - {weight_map_np.max():.3f}")
     
-    # 重みマップの正規化を改善（市松模様を防ぐため）
     weight_map_np[weight_map_np == 0] = 1.0
-    
-    # 重みマップを正規化して、オーバーラップ領域での重みの合計を1に近づける
     mean_image_norm = predictions_sum / weight_map_np
     mean_image_norm = np.clip(mean_image_norm, 0.0, 1.0)
     
-    # 重みマップの統計情報を出力（デバッグ用）
+    if len(y_coords) > 1 or len(x_coords) > 1:
+        from scipy.ndimage import gaussian_filter
+            mean_image_norm = gaussian_filter(mean_image_norm, sigma=0.5)
+                mean_image_norm = np.clip(mean_image_norm, 0.0, 1.0)
     print(f"Weight map statistics: min={weight_map_np.min():.3f}, max={weight_map_np.max():.3f}, mean={weight_map_np.mean():.3f}")
     
-    # 不確実性マップの計算（直接平均）
     uncertainty_map_np = uncertainty_sum / weight_map_np
     
-    # 不確実性の統計情報を出力
     print(f"Uncertainty calculation: uncertainty_min={uncertainty_map_np.min():.8f}, uncertainty_max={uncertainty_map_np.max():.8f}")
     
-    # 不確実性推定の改善提案
     if args.n_samples < 5:
         print(f"Note: For better uncertainty estimation, consider using --n_samples 5 or higher (current: {args.n_samples})")
     
     print(f"\nSaving final results to {output_dir}...")
     min_val, max_val = original_range
     
-    # デバッグ情報を追加
     print(f"Original range: min={min_val}, max={max_val}")
     print(f"Normalized image range: min={mean_image_norm.min():.6f}, max={mean_image_norm.max():.6f}")
     
-    # 正規化された画像を元の範囲に戻す
     mean_image_denorm = mean_image_norm * (max_val - min_val) + min_val
     
-    # デバッグ情報を追加
     print(f"Denormalized image range: min={mean_image_denorm.min():.2f}, max={mean_image_denorm.max():.2f}")
     
     mean_image_uint16 = np.clip(mean_image_denorm, 0, 65535).astype(np.uint16)
     
-    # インバート問題のチェックと修正
-    # 元の画像と比較して、画素値の分布が逆になっていないかチェック
     print(f"Final uint16 range: min={mean_image_uint16.min()}, max={mean_image_uint16.max()}")
     
-    # 元の画像の統計と比較
     original_stats = f"Original: min={min_val}, max={max_val}, mean={min_val + (max_val - min_val) * 0.5:.0f}"
     result_stats = f"Result: min={mean_image_uint16.min()}, max={mean_image_uint16.max()}, mean={mean_image_uint16.mean():.0f}"
     print(f"Comparison - {original_stats}, {result_stats}")
     
     save_16bit_dicom_image(mean_image_uint16, original_dicom, f"{output_dir}/inferred_mean_{args.n_samples}samples.dcm", scale_factor=args.upscale_factor)
     
-    # 不確実性マップの可視化を改善
     uncertainty_min = uncertainty_map_np.min()
     uncertainty_max = uncertainty_map_np.max()
     uncertainty_p99 = np.percentile(uncertainty_map_np, 99)
     
     print(f"Uncertainty stats: min={uncertainty_min:.6f}, max={uncertainty_max:.6f}, p99={uncertainty_p99:.6f}")
     
-    # 99パーセンタイルで正規化して、外れ値の影響を減らす
     if uncertainty_p99 > 0:
         uncertainty_normalized = np.clip(uncertainty_map_np / uncertainty_p99, 0, 1)
     else:
         uncertainty_normalized = uncertainty_map_np
     
-    # 対数スケールでも可視化
-    uncertainty_log = np.log1p(uncertainty_map_np * 1000)  # log1p(x) = log(1+x)
+    uncertainty_log = np.log1p(uncertainty_map_np * 1000)
     uncertainty_log_normalized = (uncertainty_log - uncertainty_log.min()) / (uncertainty_log.max() - uncertainty_log.min() + 1e-9)
     
     plt.imsave(f"{output_dir}/inferred_uncertainty_{args.n_samples}samples.png", uncertainty_normalized, cmap='inferno')
     plt.imsave(f"{output_dir}/inferred_uncertainty_{args.n_samples}samples_log.png", uncertainty_log_normalized, cmap='inferno')
     
-    # 不確実性マップをDICOM形式でも保存（スケール調整済み）
-    uncertainty_scaled = (uncertainty_map_np * 1000).astype(np.uint16)  # スケールアップしてuint16に変換
+    uncertainty_scaled = (uncertainty_map_np * 1000).astype(np.uint16)
     save_16bit_dicom_image(uncertainty_scaled, original_dicom, f"{output_dir}/inferred_uncertainty_{args.n_samples}samples.dcm", scale_factor=args.upscale_factor)
     print("Inference finished.")
 
@@ -306,17 +285,14 @@ def A_box_average(hr_image: torch.Tensor, scale: int) -> torch.Tensor:
     """Forward operator A: box-average downsampling by integer factor (uses utils.custom_downsample semantics)."""
     return F.avg_pool2d(hr_image, kernel_size=scale, stride=scale, ceil_mode=False, count_include_pad=False)
 
-
 def AT_box_average(lr_residual: torch.Tensor, scale: int, target_size: torch.Size) -> torch.Tensor:
     """Adjoint A^T of box-average downsampling: repeat residual to HR grid and normalize.
     target_size: (B, C, H, W) of HR image
     """
     up = lr_residual.repeat_interleave(scale, dim=-1).repeat_interleave(scale, dim=-2)
-    # Crop or pad to match target size
     _, _, H, W = target_size
     up = up[:, :, :H, :W]
     return up / (scale * scale)
-
 
 @torch.no_grad()
 def run_zero_shot(args, device):
@@ -324,24 +300,19 @@ def run_zero_shot(args, device):
     if not args.prior_path:
         raise SystemExit("--prior_path is required for --mode zs (pretrained diffusion prior weights)")
 
-    # Load LR image
     i_lr, original_range, original_dicom = load_dicom_image(args.input_image_path, device)
     upscale = args.upscale_factor
 
-    # Prepare HR target shape
     H_hr, W_hr = i_lr.shape[2] * upscale, i_lr.shape[3] * upscale
     x = torch.randn(1, 1, H_hr, W_hr, device=device)
 
-    # Condition: nearest-exact upsample of LR (no smoothing)
     cond = F.interpolate(i_lr, size=(H_hr, W_hr), mode='nearest-exact')
 
-    # Model
     model = SimpleUnet(dropout_rate=args.dropout_rate).to(device)
     state = torch.load(args.prior_path, map_location=device)
     model.load_state_dict(state)
     model.eval()
 
-    # Schedules (use global schedule already set)
     timesteps = args.timesteps
 
     for t in reversed(range(timesteps)):
@@ -350,26 +321,18 @@ def run_zero_shot(args, device):
         sqrt_one_minus_alphas_cumprod_t = schedule.sqrt_one_minus_alphas_cumprod.to(device)[t].reshape(-1, 1, 1, 1)
         sqrt_recip_alphas_t = schedule.sqrt_recip_alphas.to(device)[t].reshape(-1, 1, 1, 1)
 
-        # Predict noise and DDPM mean
         pred_noise = model(x, t_tensor, cond)
         model_mean = sqrt_recip_alphas_t * (x - betas_t * pred_noise / sqrt_one_minus_alphas_cumprod_t)
 
-        # Data-consistency in x0-space: enforce A(x0) ≈ y
-        # Estimate x0 from current step
-        # x0 ≈ (x - sqrt(1-ᾱ_t) * ε)/sqrt(ᾱ_t)
         sqrt_alphas_cumprod_t = schedule.sqrt_alphas_cumprod.to(device)[t].reshape(-1, 1, 1, 1)
         x0_est = (x - sqrt_one_minus_alphas_cumprod_t * pred_noise) / (sqrt_alphas_cumprod_t + 1e-8)
-        # Residual in LR space
         y_obs = i_lr
         y_hat = A_box_average(x0_est, upscale)
         r = y_hat - y_obs
-        # Backproject
         grad = AT_box_average(r, upscale, x0_est.shape)
         x0_corrected = x0_est - args.zs_lambda * grad
-        # Map corrected x0 back to x_t domain by re-noising with expected noise
         x = sqrt_alphas_cumprod_t * x0_corrected + sqrt_one_minus_alphas_cumprod_t * pred_noise
 
-        # Add stochasticity except at t==0
         if t > 0:
             posterior_variance_t = schedule.posterior_variance.to(device)[t].reshape(-1, 1, 1, 1)
             noise = torch.randn_like(x)
@@ -377,7 +340,6 @@ def run_zero_shot(args, device):
         else:
             x = model_mean
 
-    # Save outputs
     output_dir = args.output_dir_base
     os.makedirs(output_dir, exist_ok=True)
     min_val, max_val = original_range
@@ -393,15 +355,15 @@ if __name__ == '__main__':
     parser.add_argument("--dropout_rate", type=float, default=0.1)
     parser.add_argument("--timesteps", type=int, default=200)
     parser.add_argument("--output_dir_base", type=str, default="Results")
-    parser.add_argument("--training_steps", type=int, default=3000)
+    parser.add_argument("--training_steps", type=int, default=5000)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--patch_size", type=int, default=128, help="Patch size for TRAINING.")
+    parser.add_argument("--patch_size", type=int, default=256, help="Patch size for TRAINING.")
     parser.add_argument("--interpolation_mode", type=str, default='bilinear', choices=['bilinear', 'nearest-exact'])
     parser.add_argument("--lambda_l1", type=float, default=1.0)
     parser.add_argument("--lambda_perceptual", type=float, default=0.1)
     parser.add_argument("--model_path", type=str, help="Path to the trained model for inference mode.")
-    parser.add_argument("--inf_patch_size", type=int, default=384)
+    parser.add_argument("--inf_patch_size", type=int, default=512)
     parser.add_argument("--inf_overlap", type=int, default=128)
     parser.add_argument("--n_samples", type=int, default=3)
     parser.add_argument("--use_amp", action='store_true', help="Use Automatic Mixed Precision for faster training and inference.")
