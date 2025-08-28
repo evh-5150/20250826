@@ -153,18 +153,17 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
     # 市松模様を防ぐために、より小さなストライドを使用
     if len(y_coords) > 1 and len(x_coords) > 1:
     # オーバーラップを50%以上に増やす
-    min_overlap = args.inf_patch_size // 2
-    if args.inf_overlap < min_overlap:
-    print(f"Warning: Increasing overlap from {args.inf_overlap} to {min_overlap} to prevent checkerboard pattern")
-    stride = args.inf_patch_size - min_overlap
-    y_coords = list(range(0, h_sr - args.inf_patch_size + 1, stride))
-    x_coords = list(range(0, w_sr - args.inf_patch_size + 1, stride))
-        
+        min_overlap = args.inf_patch_size // 2
+        if args.inf_overlap < min_overlap:
+            print(f"Warning: Increasing overlap from {args.inf_overlap} to {min_overlap} to prevent checkerboard pattern")
+            stride = args.inf_patch_size - min_overlap
+            y_coords = list(range(0, h_sr - args.inf_patch_size + 1, stride))
+            x_coords = list(range(0, w_sr - args.inf_patch_size + 1, stride))
     # 最後のパッチが境界に到達するように調整
-    if y_coords and y_coords[-1] + args.inf_patch_size < h_sr:
-        y_coords.append(h_sr - args.inf_patch_size)
-    if x_coords and x_coords[-1] + args.inf_patch_size < w_sr:
-        x_coords.append(w_sr - args.inf_patch_size)
+        if y_coords and y_coords[-1] + args.inf_patch_size < h_sr:
+            y_coords.append(h_sr - args.inf_patch_size)
+        if x_coords and x_coords[-1] + args.inf_patch_size < w_sr:
+            x_coords.append(w_sr - args.inf_patch_size)
         
     pbar_patch = tqdm(total=len(y_coords) * len(x_coords), desc="Processing Patches")
 
@@ -229,9 +228,9 @@ def run_inference(args, device, model=None, output_dir=None, i_lr=None, original
     
     if len(y_coords) > 1 or len(x_coords) > 1:
         from scipy.ndimage import gaussian_filter
-            mean_image_norm = gaussian_filter(mean_image_norm, sigma=0.5)
-                mean_image_norm = np.clip(mean_image_norm, 0.0, 1.0)
-    print(f"Weight map statistics: min={weight_map_np.min():.3f}, max={weight_map_np.max():.3f}, mean={weight_map_np.mean():.3f}")
+        mean_image_norm = gaussian_filter(mean_image_norm, sigma=0.5)
+        mean_image_norm = np.clip(mean_image_norm, 0.0, 1.0)
+        print(f"Weight map statistics: min={weight_map_np.min():.3f}, max={weight_map_np.max():.3f}, mean={weight_map_np.mean():.3f}")
     
     uncertainty_map_np = uncertainty_sum / weight_map_np
     
